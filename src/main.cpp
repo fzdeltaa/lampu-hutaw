@@ -99,7 +99,6 @@ void readVibrationSensor()
     static unsigned long lastTriggerMs = 0;
 
     bool currentState = digitalRead(VIBRATION_PIN);
-
     if (currentState == LOW && lastState == HIGH) {
         if (millis() - lastTriggerMs > 300) {
             lastTriggerMs = millis();
@@ -110,6 +109,7 @@ void readVibrationSensor()
             setBrightness(snapped);
             preferences.putInt("brightness", snapped);
             FastLED.setBrightness(snapped);
+            FastLED.show();
         }
     }
     lastState = currentState;
