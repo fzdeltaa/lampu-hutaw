@@ -6,18 +6,23 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include "secrets.h"
+#include "esp_sleep.h"
 
 #define LED_PIN 1
 #define NUM_LEDS 8
 #define LED_TYPE WS2811
 #define COLOR_ORDER GRB
 #define VIBRATION_PIN 5
+#define SLEEP_AFTER_MS (4UL * 60 * 60 * 1000)
 
 const char *ssid     = WIFI_SSID_1;
 const char *password = WIFI_PASSWORD_1;
 
 const char *ssidKos     = WIFI_SSID_2;
 const char *passwordKos = WIFI_PASSWORD_2;
+
+const char *ssidOwn    = WIFI_SSID_3;
+const char *passwordOwn = WIFI_PASSWORD_3;
 
 const char* mdnsName = MDNS_NAME;
 
@@ -40,7 +45,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 <input type="text" name="password" id="password">
 <br>
 <label for="brightness">Brightness</label>
-<input type="range" id="brightness" name="brightness" min="0" max="160" />
+<input type="range" id="brightness" name="brightness" min="0" max="240" />
 <br>
 <button type="button">Change</button>
 <script>
@@ -74,6 +79,9 @@ CRGB leds[NUM_LEDS];
 volatile int brightness;
 portMUX_TYPE brightnessMux = portMUX_INITIALIZER_UNLOCKED;
 
+RTC_DATA_ATTR int savedBrightness = 48;
+RTC_DATA_ATTR uint32_t savedColor = 0xFFFFFF;
+
 int getBrightness() {
     int val;
     portENTER_CRITICAL(&brightnessMux);
@@ -89,7 +97,7 @@ void setBrightness(int val) {
 }
 
 int snapBrightness(int value) {
-    int step = 32;
+    int step = 48;
     return (value / step) * step;
 }
 
@@ -104,8 +112,8 @@ void readVibrationSensor()
             lastTriggerMs = millis();
             int snapped = snapBrightness(getBrightness());
 
-            snapped += 32;
-            if (snapped > 160) snapped = 0;
+            snapped += 48;
+            if (snapped > 240) snapped = 0;
             setBrightness(snapped);
             preferences.putInt("brightness", snapped);
             FastLED.setBrightness(snapped);
@@ -115,19 +123,42 @@ void readVibrationSensor()
     lastState = currentState;
 }
 
+void goToSleep() {
+    FastLED.setBrightness(0);
+    FastLED.show();
+    esp_deep_sleep_enable_gpio_wakeup(1ULL << VIBRATION_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
+    esp_deep_sleep_start();
+}
+
 void setup()
 {
     Serial.begin(115200);
     preferences.begin("led", false);
     pinMode(VIBRATION_PIN, INPUT_PULLUP);
+
+    FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
+
+    esp_sleep_wakeup_cause_t reason = esp_sleep_get_wakeup_cause();
+
+    if (reason == ESP_SLEEP_WAKEUP_GPIO) {
+        setBrightness(savedBrightness);
+        FastLED.setBrightness(savedBrightness);
+        fill_solid(leds, NUM_LEDS, CRGB(savedColor));
+        FastLED.show();
+    }
+
     WiFi.begin(ssid, password);
     if (WiFi.waitForConnectResult() != WL_CONNECTED)
     {
         WiFi.begin(ssidKos, passwordKos);
         if (WiFi.waitForConnectResult() != WL_CONNECTED)
         {
-            Serial.printf("WiFi Failed!\n");
-            return;
+            WiFi.begin(ssidOwn, passwordOwn);
+            if (WiFi.waitForConnectResult() != WL_CONNECTED)
+            {
+                Serial.printf("WiFi Failed!\n");
+                return;
+            }
         }
     }
     Serial.println("\nIP: " + WiFi.localIP().toString());
@@ -160,7 +191,7 @@ void setup()
                 }
                 if (request->hasParam("brightness")) {
                     int b = request->getParam("brightness")->value().toInt();
-                    setBrightness(constrain(b, 0, 160));
+                    setBrightness(constrain(b, 0, 240));
                     preferences.putInt("brightness", getBrightness());
                     FastLED.setBrightness(getBrightness());
                 }
@@ -173,8 +204,7 @@ void setup()
 
     server.begin();
 
-    FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
-    setBrightness(preferences.getInt("brightness", 32));
+    setBrightness(preferences.getInt("brightness", 48));
     uint32_t color = preferences.getUInt("color", 0xFFFFFF);
     FastLED.setBrightness(getBrightness());
 
@@ -185,4 +215,7 @@ void setup()
 void loop()
 {
     readVibrationSensor();
+    if (millis() >= SLEEP_AFTER_MS) {
+        goToSleep();
+    }
 }
