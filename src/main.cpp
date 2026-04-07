@@ -14,15 +14,12 @@
 #define COLOR_ORDER GRB
 #define VIBRATION_PIN 5
 #define SLEEP_AFTER_MS (4UL * 60 * 60 * 1000)
+#define SLEEP_AFTER_MS_IF_TURNED_OFF (15UL * 60 * 1000)
+#define WIFI_RETRY_INTERVAL_MS 10000
 
-const char *ssid     = WIFI_SSID_1;
-const char *password = WIFI_PASSWORD_1;
-
-const char *ssidKos     = WIFI_SSID_2;
-const char *passwordKos = WIFI_PASSWORD_2;
-
-const char *ssidOwn    = WIFI_SSID_3;
-const char *passwordOwn = WIFI_PASSWORD_3;
+const char* ssids[] = { WIFI_SSID_1, WIFI_SSID_2, WIFI_SSID_3 };
+const char* passwords[] = { WIFI_PASSWORD_1, WIFI_PASSWORD_2, WIFI_PASSWORD_3 };
+const int NUM_NETWORKS = sizeof(ssids) / sizeof(ssids[0]);
 
 const char* mdnsName = MDNS_NAME;
 
@@ -116,6 +113,7 @@ void readVibrationSensor()
             if (snapped > 240) snapped = 0;
             setBrightness(snapped);
             preferences.putInt("brightness", snapped);
+            savedBrightness = snapped;
             FastLED.setBrightness(snapped);
             FastLED.show();
         }
@@ -123,11 +121,44 @@ void readVibrationSensor()
     lastState = currentState;
 }
 
+bool serverStarted = false;
+int ssidIndex = 0;
+
 void goToSleep() {
     FastLED.setBrightness(0);
     FastLED.show();
     esp_deep_sleep_enable_gpio_wakeup(1ULL << VIBRATION_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
     esp_deep_sleep_start();
+}
+
+void connectWifi() {
+    WiFi.disconnect(true);
+    delay(100);
+    Serial.printf("Trying SSID: %s\n", ssids[ssidIndex]);
+    WiFi.begin(ssids[ssidIndex], passwords[ssidIndex]);
+}
+
+void WiFiStationDisconnected(WiFiEvent_t event, WiFiEventInfo_t info){
+    Serial.println("Disconnected from WiFi access point");
+    Serial.print("WiFi lost connection. Reason: ");
+    Serial.println(info.wifi_sta_disconnected.reason);
+
+    ssidIndex = (ssidIndex + 1) % NUM_NETWORKS;
+}
+
+void WiFiStationConnected(WiFiEvent_t event, WiFiEventInfo_t info){
+    Serial.println("IP: " + WiFi.localIP().toString());
+    MDNS.end();
+    if (!MDNS.begin(mdnsName)) {
+        Serial.println("Error setting up MDNS responder!");
+    } else {
+        MDNS.addService("_http", "_tcp", 80);
+    }
+    if (!serverStarted)
+    {
+        server.begin();
+        serverStarted = true;
+    }
 }
 
 void setup()
@@ -144,30 +175,16 @@ void setup()
         setBrightness(savedBrightness);
         FastLED.setBrightness(savedBrightness);
         fill_solid(leds, NUM_LEDS, CRGB(savedColor));
-        FastLED.show();
+    } else {
+        setBrightness(preferences.getInt("brightness", 48));
+        uint32_t color = preferences.getUInt("color", 0xFFFFFF);
+        FastLED.setBrightness(getBrightness());
+        fill_solid(leds, NUM_LEDS, CRGB(color));
     }
+    FastLED.show();
 
-    WiFi.begin(ssid, password);
-    if (WiFi.waitForConnectResult() != WL_CONNECTED)
-    {
-        WiFi.begin(ssidKos, passwordKos);
-        if (WiFi.waitForConnectResult() != WL_CONNECTED)
-        {
-            WiFi.begin(ssidOwn, passwordOwn);
-            if (WiFi.waitForConnectResult() != WL_CONNECTED)
-            {
-                Serial.printf("WiFi Failed!\n");
-                return;
-            }
-        }
-    }
-    Serial.println("\nIP: " + WiFi.localIP().toString());
-    if (!MDNS.begin(mdnsName)) {
-        Serial.println("Error setting up MDNS responder!");
-        while(1) {
-            delay(1000);
-        }
-    }
+    WiFi.onEvent(WiFiStationConnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
+    WiFi.onEvent(WiFiStationDisconnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);   
 
     server.on("/brightness", HTTP_GET, [](AsyncWebServerRequest *request) { 
         request->send(200, "application/json", "{\"brightness\":" + String(getBrightness()) + "}");
@@ -188,34 +205,43 @@ void setup()
                     uint32_t number = strtoul(color.substring(1).c_str(), NULL, 16);
                     fill_solid(leds, NUM_LEDS, CRGB(number));
                     preferences.putUInt("color", number);
+                    savedColor = number;
                 }
                 if (request->hasParam("brightness")) {
                     int b = request->getParam("brightness")->value().toInt();
                     setBrightness(constrain(b, 0, 240));
                     preferences.putInt("brightness", getBrightness());
                     FastLED.setBrightness(getBrightness());
+                    savedBrightness = getBrightness();
                 }
                 FastLED.show();
             }
         }
         request->send(200, "text/plain", "OK"); 
     });
-    MDNS.addService("_http", "_tcp", 80);
-
-    server.begin();
-
-    setBrightness(preferences.getInt("brightness", 48));
-    uint32_t color = preferences.getUInt("color", 0xFFFFFF);
-    FastLED.setBrightness(getBrightness());
-
-    fill_solid(leds, NUM_LEDS, CRGB(color));
-    FastLED.show();
+    connectWifi();
 }
 
 void loop()
 {
+    Serial.println("kontol");
     readVibrationSensor();
-    if (millis() >= SLEEP_AFTER_MS) {
-        goToSleep();
+    if (getBrightness() == 0)
+    {
+        if (millis() >= SLEEP_AFTER_MS_IF_TURNED_OFF) {
+            goToSleep();
+        }
+    } else {
+    
+        if (millis() >= SLEEP_AFTER_MS) {
+            goToSleep();
+        }
+    }
+
+    static unsigned long lastWifiRetry = 0;
+    if (WiFi.status() != WL_CONNECTED && millis() - lastWifiRetry > WIFI_RETRY_INTERVAL_MS) {
+        lastWifiRetry = millis();
+        Serial.println("WiFi not connected, retrying...");
+        connectWifi();
     }
 }
