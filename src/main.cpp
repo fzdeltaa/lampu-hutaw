@@ -224,7 +224,7 @@ void setup()
 
 void loop()
 {
-    Serial.println("kontol");
+    // Serial.println("kontol");
     readVibrationSensor();
     if (getBrightness() == 0)
     {
